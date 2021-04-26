@@ -1,29 +1,37 @@
 module CASkellParser where
 
+import Poly
+
 import qualified Text.ParserCombinators.Parsec as P
 import Text.ParserCombinators.Parsec ((<|>),many,(<?>))
 import qualified Text.ParserCombinators.Parsec.Token as T
 import Text.ParserCombinators.Parsec.Language
 import Text.ParserCombinators.Parsec.Expr
+import Data.Functor
+import GHC.Integer
+import Data.Ratio
 
 
 -- AST --
 
 data Prog = P [Stmt]
-            deriving (Eq, Show)
+            deriving (Show)
                      
 data Stmt = Assign String Expr 
           | Print Expr 
-            deriving (Eq, Show)
+            deriving (Show)
 
 data Expr = Var     String 
           | Const   Polynomial 
           | Pow     Expr Integer
           | Plus    Expr Expr 
           | Times   Expr Expr 
+          | Div     Expr Expr 
+          | Mod     Expr Expr 
           | Neg     Expr 
           | GCD     Expr Expr 
           | Norm    Expr 
+            deriving (Show)
 
 --
 -- x := Poly(x^2 - x + 4)
@@ -42,7 +50,7 @@ data Expr = Var     String
 --          GCD(Expr, Expr)
 --          Normalise(Expr)
 --          (Expr₁)
--- Poly ::= ℕx^ℕ (+ ℕx^ℕ)*
+-- Poly ::= ℕx^ℕ (+ ℕx^ℕ)* 
 -- Op ::= + | ×
 
 
@@ -55,7 +63,8 @@ ldef = emptyDef {  T.identStart = P.letter
                                                <|> P.char '$'<|> P.char '#')
                  , T.reservedNames = [ "print"
                                      , "gcd"
-                                     , "normalise" ]
+                                     , "normalise"
+                                     , "x" ]
                  , T.commentLine = "--"
                  }
  
@@ -77,33 +86,60 @@ progParser = P <$> P.sepBy1 stmtParser semi
 
 stmtParser :: P.Parser Stmt
 stmtParser = Assign <$> identifier <* symbol ":=" <*> expr_1_Parser 
-        <|>  Print <$> expr_1_Parser 
+        <|>  Print <$> (reserved "print" *> parens expr_1_Parser) 
 
-expr_1_Parser :: P.Parser Stmt
-expr_1_Parser = Pow <$> expr_2_Parser <* symbol "^" <*> natural
-            <|> Pow <$> expr_2_Parser <*> exponentParser
+expr_1_Parser :: P.Parser Expr
+expr_1_Parser = P.try (Pow <$> expr_2_Parser <*> exponentParser)
+        <|> P.chainl1 expr_2_Parser opParser
+        -- <|> expr_2_Parser
 
 exponentParser :: P.Parser Integer 
-exponentParser = symbol "^" <*> natural 
-            <|> choice [symbol "¹" $> 1]--
+exponentParser = symbol "^" *> natural 
+        --     <|> P.choice [symbol "¹" $> 1]--
 
-expr_2_Parser :: P.Parser Stmt
+expr_2_Parser :: P.Parser Expr
 expr_2_Parser = Var <$> identifier
+        --     <|> P.chainl1 expr_1_Parser opParser 
             <|> Const <$> parens polyParse 
-            <|> chainl1 expr_1_Parser opParser 
-            <|> uncurry GCD <$> reserved "gcd" *>
+            <|>  reserved "gcd" *>
                     parens (do {
                         lhs <- expr_1_Parser ;
                         symbol "," ; 
                         rhs <- expr_1_Parser ;
-                        return (lhs, rhs)
+                        return $ GCD lhs rhs
                     })
-            <|> Norm <$> reserved "normalise" *> parens expr_1_Parser
-            <|> parens expr_1_Parser
+            <|> Norm <$> (reserved "normalise" *> parens expr_1_Parser)
+        --     <|> parens expr_1_Parser
 
 
-opParser :: P.Parser BinOp 
-opParser = symbol "+" $> Plus
-        <|> oneOf "×*" $> Times
+opParser :: P.Parser (Expr -> Expr -> Expr) 
+opParser = symbol "*" $> Times
+        <|> symbol "/" $> Div
+        <|> symbol "%" $> Mod
 
-polyParse 
+-- (x^2 - x + 4)
+
+
+-- This is a nasty hack. 
+polyParse :: P.Parser Polynomial
+polyParse = do {
+                hd <-  (P.option id (symbol "-" $> negateInteger)) >>= termParse ;
+                tl <- P.many ((P.choice [
+                                symbol "+" $> id ,
+                                symbol "-" $> negateInteger
+                        ]) >>= termParse) ;
+                return $ PolySum  (hd : tl)
+        }
+        where
+                termParse :: (Integer -> Integer) -> P.Parser (Coeff, Exponent)
+                termParse symb = do {
+                                coeff <- P.option 1 integer ;
+                                exp <- P.option 0 (reserved "x" *> P.option 1 exponentParser) ; 
+                                return ((symb coeff) % 1,  exp)
+                        }
+
+
+parseFromFile p fname = do { 
+        input <- readFile fname
+        ; return (P.runParser p () fname input)
+       }
